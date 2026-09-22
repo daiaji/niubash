@@ -115,6 +115,8 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 | "--install-wt-profile"
                 | "--self-update"
         )
+        && !legacy_command_mode_has_post_c_login_flag(args)
+        && ShellInvocation::parse(&args[1..]).is_ok()
     {
         // P3 invocation alignment: a leading-dash argument the engine parser
         // rejects is a usage error with the GNU surface (shell.c:874-881):
@@ -161,19 +163,21 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         "plugin" => run_plugin_command(args),
         "-C" | "--repl-command" => run_repl_command(args),
         "-c" => {
-            if args.len() < 3 {
-                anyhow::bail!("-c requires an argument");
-            }
+            let command_mode = parse_legacy_command_mode(args)?;
             let mut shell = niubash_runtime::Shell::new()?;
             niubash_runtime::startup_trace::tick("-c: Shell::new");
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
-            shell.executor.set_env("BASH_EXECUTION_STRING", &args[2]);
-            if let Some(command_name) = args.get(3) {
+            shell
+                .executor
+                .set_env("BASH_EXECUTION_STRING", command_mode.command);
+            if let Some(command_name) = command_mode.command_name {
                 shell.set_script_name(command_name);
-                shell.executor.set_positional_params(args[4..].to_vec());
+                shell
+                    .executor
+                    .set_positional_params(command_mode.positional_params.to_vec());
             }
-            let code = shell.execute_script(&args[2])?;
+            let code = shell.execute_script(command_mode.command)?;
             niubash_runtime::startup_trace::tick("-c: execute_script");
             let code = shell.finish_with_exit_trap(code)?;
             niubash_runtime::startup_trace::tick("-c: exit trap");
@@ -206,6 +210,34 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+struct LegacyCommandMode<'a> {
+    command: &'a str,
+    command_name: Option<&'a str>,
+    positional_params: &'a [String],
+}
+
+fn parse_legacy_command_mode(args: &[String]) -> anyhow::Result<LegacyCommandMode<'_>> {
+    let mut index = 2;
+    while matches!(args.get(index).map(String::as_str), Some("-l" | "--login")) {
+        index += 1;
+    }
+    let Some(command) = args.get(index) else {
+        anyhow::bail!("-c requires an argument");
+    };
+    let command_name = args.get(index + 1).map(String::as_str);
+    let positional_params = args.get(index + 2..).unwrap_or(&[]);
+    Ok(LegacyCommandMode {
+        command,
+        command_name,
+        positional_params,
+    })
+}
+
+fn legacy_command_mode_has_post_c_login_flag(args: &[String]) -> bool {
+    matches!(args.get(1).map(String::as_str), Some("-c"))
+        && matches!(args.get(2).map(String::as_str), Some("-l" | "--login"))
 }
 
 fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {

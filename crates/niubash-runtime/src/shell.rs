@@ -644,17 +644,6 @@ impl Shell {
         Ok(code)
     }
 
-    fn disable_rubash_history_storage(&mut self) {
-        let previous_exit_code = self.executor.last_exit_code();
-        self.executor.set_shell_option("history", false);
-        self.executor.unset_env("HISTFILE");
-        let ast = parse(&tokenize("unset HISTFILE"));
-        let _ = self.executor.execute_ast(&ast);
-        self.executor.set_shell_option("history", false);
-        self.executor.unset_env("HISTFILE");
-        self.executor.set_last_exit_code(previous_exit_code);
-    }
-
     /// Mark this shell as interactive.
     ///
     /// Two consequences: easter eggs become routable, and rubash diagnostics

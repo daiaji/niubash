@@ -263,6 +263,7 @@ fn build_edit_mode(
         EditorMode::Emacs => {
             let mut keybindings = default_emacs_keybindings();
             add_menu_keybindings(&mut keybindings);
+            add_system_clipboard_keybindings(&mut keybindings);
             add_native_widget_keybindings(
                 &mut keybindings,
                 NativeKeymapTarget::Emacs,
@@ -283,6 +284,8 @@ fn build_edit_mode(
             let mut normal_keybindings = default_vi_normal_keybindings();
             add_menu_keybindings(&mut insert_keybindings);
             add_menu_keybindings(&mut normal_keybindings);
+            add_system_clipboard_keybindings(&mut insert_keybindings);
+            add_system_clipboard_keybindings(&mut normal_keybindings);
             add_native_widget_keybindings(
                 &mut insert_keybindings,
                 NativeKeymapTarget::ViInsert,
@@ -348,6 +351,14 @@ fn add_menu_keybindings(keybindings: &mut Keybindings) {
         KeyModifiers::SHIFT,
         KeyCode::BackTab,
         ReedlineEvent::MenuPrevious,
+    );
+}
+
+fn add_system_clipboard_keybindings(keybindings: &mut Keybindings) {
+    keybindings.add_binding(
+        KeyModifiers::CONTROL,
+        KeyCode::Char('v'),
+        ReedlineEvent::Edit(vec![EditCommand::PasteSystem]),
     );
 }
 
@@ -1555,6 +1566,39 @@ mod tests {
                 Some(ReedlineEvent::UntilFound(_))
             ));
         }
+    }
+
+    #[test]
+    fn default_keybindings_keep_ctrl_c_as_interrupt_and_add_ctrl_v_paste() {
+        let mut emacs = default_emacs_keybindings();
+        add_system_clipboard_keybindings(&mut emacs);
+        assert_eq!(
+            emacs.find_binding(
+                KeyModifiers::CONTROL,
+                KeyCode::Char('c')
+            ),
+            Some(ReedlineEvent::CtrlC)
+        );
+        assert_eq!(
+            emacs.find_binding(
+                KeyModifiers::CONTROL,
+                KeyCode::Char('v')
+            ),
+            Some(ReedlineEvent::Edit(vec![EditCommand::PasteSystem]))
+        );
+    }
+
+    #[test]
+    fn vi_insert_keybindings_add_ctrl_v_paste() {
+        let mut insert = default_vi_insert_keybindings();
+        add_system_clipboard_keybindings(&mut insert);
+        assert_eq!(
+            insert.find_binding(
+                KeyModifiers::CONTROL,
+                KeyCode::Char('v')
+            ),
+            Some(ReedlineEvent::Edit(vec![EditCommand::PasteSystem]))
+        );
     }
 
     #[test]

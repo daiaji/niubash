@@ -160,6 +160,28 @@ fn bash_style_errexit_option_reaches_rubash() {
 }
 
 #[test]
+fn bash_style_login_option_after_c_reaches_rubash() {
+    let temp = unique_temp_dir("niubash-host-c-login");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = Command::new(niu_binary())
+        .args(["-c", "-l", "printf '%s\\n' hi"])
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+
+    assert_success(&output, "Bash -c -l host invocation");
+    assert_eq!(normalize_text(&output.stdout), "hi");
+    assert_eq!(normalize_text(&output.stderr), "");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn slash_drive_paths_are_compat_input_not_default_output() {
     if !cfg!(windows) {
         return;
