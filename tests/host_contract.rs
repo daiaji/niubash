@@ -91,6 +91,27 @@ fn history_and_fc_use_the_host_history_provider() {
 }
 
 #[test]
+fn command_mode_runs_when_history_file_cannot_be_created() {
+    let temp = unique_temp_dir("niubash-host-history-fallback");
+    let home = temp.join("home-file");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&home, "home is intentionally a file").unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_niu("printf '%s' command-ok", &start, &home, &[]);
+    assert_success(&output, "history fallback command mode");
+    assert_eq!(normalize_text(&output.stdout), "command-ok");
+    assert_eq!(normalize_text(&output.stderr), "");
+    assert_eq!(
+        std::fs::read_to_string(home).unwrap(),
+        "home is intentionally a file"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn script_mode_keeps_engine_history_data_plane() {
     // P2: non-interactive runs keep the engine's history machinery active so
     // `set -H`, fc, and the history builtin behave as under rubash/GNU. The

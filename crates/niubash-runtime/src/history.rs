@@ -206,7 +206,7 @@ struct HistoryState {
 /// the file before queries when another process has changed it.
 pub(crate) struct LiveFileBackedHistory {
     capacity: usize,
-    path: PathBuf,
+    path: Option<PathBuf>,
     state: Mutex<HistoryState>,
     mode: HistoryMode,
 }
@@ -228,8 +228,29 @@ impl LiveFileBackedHistory {
         } else {
             capacity
         };
-        let history = FileBackedHistory::with_file(history_capacity, path.clone())?;
-        let signature = file_signature(&path)?;
+        let (history, path, signature) =
+            match FileBackedHistory::with_file(history_capacity, path.clone()) {
+                Ok(history) => {
+                    let signature = file_signature(&path)?;
+                    (history, Some(path), signature)
+                }
+                Err(error) => {
+                    // History is auxiliary state. A restricted token may be
+                    // able to execute in the workspace while being unable to
+                    // update the user's profile history file. Keep the shell
+                    // usable with an in-memory history in that case.
+                    log::debug!(
+                        "history file {} unavailable; using in-memory history: {}",
+                        path.display(),
+                        error
+                    );
+                    (
+                        FileBackedHistory::new(history_capacity)?,
+                        None,
+                        FileSignature::default(),
+                    )
+                }
+            };
         Ok(Self {
             capacity,
             path,
@@ -252,10 +273,13 @@ impl LiveFileBackedHistory {
 
     fn refresh_if_stale(
         capacity: usize,
-        path: &Path,
+        path: Option<&Path>,
         state: &mut HistoryState,
         mode: HistoryMode,
     ) -> Result<()> {
+        let Some(path) = path else {
+            return Ok(());
+        };
         if mode != HistoryMode::Shared {
             return Ok(());
         }
@@ -276,9 +300,12 @@ impl LiveFileBackedHistory {
         Ok(())
     }
 
-    fn sync_state(path: &Path, state: &mut HistoryState) -> io::Result<()> {
+    fn sync_state(path: Option<&Path>, state: &mut HistoryState) -> io::Result<()> {
         state.history.sync()?;
-        state.signature = file_signature(path)?;
+        state.signature = match path {
+            Some(path) => file_signature(path)?,
+            None => FileSignature::default(),
+        };
         Ok(())
     }
 }
@@ -289,9 +316,9 @@ impl History for LiveFileBackedHistory {
         let path = self.path.clone();
         let mode = self.mode;
         let mut state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
+        Self::refresh_if_stale(capacity, path.as_deref(), &mut state, mode)?;
         let saved = state.history.save(item)?;
-        Self::sync_state(&path, &mut state)?;
+        Self::sync_state(path.as_deref(), &mut state)?;
         Ok(saved)
     }
 
@@ -300,7 +327,7 @@ impl History for LiveFileBackedHistory {
         let path = self.path.clone();
         let mode = self.mode;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
+        Self::refresh_if_stale(capacity, path.as_deref(), &mut state, mode)?;
         state.history.load(id)
     }
 
@@ -309,7 +336,7 @@ impl History for LiveFileBackedHistory {
         let path = self.path.clone();
         let mode = self.mode;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
+        Self::refresh_if_stale(capacity, path.as_deref(), &mut state, mode)?;
         state.history.count(query)
     }
 
@@ -318,7 +345,7 @@ impl History for LiveFileBackedHistory {
         let path = self.path.clone();
         let mode = self.mode;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
+        Self::refresh_if_stale(capacity, path.as_deref(), &mut state, mode)?;
         state.history.search(query)
     }
 
@@ -331,7 +358,7 @@ impl History for LiveFileBackedHistory {
         let path = self.path.clone();
         let mode = self.mode;
         let mut state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
+        Self::refresh_if_stale(capacity, path.as_deref(), &mut state, mode)?;
         state.history.update(id, updater)
     }
 
@@ -340,9 +367,12 @@ impl History for LiveFileBackedHistory {
         let path = self.path.clone();
         let mode = self.mode;
         let mut state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
+        Self::refresh_if_stale(capacity, path.as_deref(), &mut state, mode)?;
         state.history.clear()?;
-        state.signature = file_signature(&path)?;
+        state.signature = match path.as_deref() {
+            Some(path) => file_signature(path)?,
+            None => FileSignature::default(),
+        };
         Ok(())
     }
 
@@ -351,13 +381,13 @@ impl History for LiveFileBackedHistory {
         let path = self.path.clone();
         let mode = self.mode;
         let mut state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
+        Self::refresh_if_stale(capacity, path.as_deref(), &mut state, mode)?;
         state.history.delete(id)
     }
 
     fn sync(&mut self) -> io::Result<()> {
         let state = self.state.get_mut().map_err(|_| history_lock_error())?;
-        Self::sync_state(&self.path, state)
+        Self::sync_state(self.path.as_deref(), state)
     }
 
     fn session(&self) -> Option<HistorySessionId> {
@@ -411,6 +441,29 @@ fn file_signature(path: &Path) -> io::Result<FileSignature> {
 mod tests {
     use super::*;
     use reedline::{HistoryItem, SearchQuery};
+
+    #[test]
+    fn unavailable_history_file_falls_back_to_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("history-parent");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("history");
+
+        let mut history = LiveFileBackedHistory::with_mode(100, path, HistoryMode::Shared)
+            .expect("unavailable history file should fall back to memory");
+        history
+            .save(HistoryItem::from_command_line("echo fallback"))
+            .unwrap();
+
+        let commands = history
+            .search(SearchQuery::all_that_contain_rev(String::new()))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.command_line)
+            .collect::<Vec<_>>();
+        assert_eq!(commands, vec!["echo fallback"]);
+        assert_eq!(std::fs::read_to_string(parent).unwrap(), "not a directory");
+    }
 
     #[test]
     fn saved_entries_are_visible_to_another_history_instance() {
