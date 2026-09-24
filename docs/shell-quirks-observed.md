@@ -592,7 +592,11 @@ argument rather than redirected stdin) when the number gates a decision.
 
 **Status (2026-09-24 audit): OPEN, not reproducible.** Both `wc -c <
 file` and `wc -c file` returned the correct count (6 bytes) on a freshly
-written file in the audit, on winuxcmd 1.0.8. If it recurs, capture the
+written file in the audit, on winuxcmd 1.0.8. Follow-up stress (same day,
+current engine): 400 rounds across two write paths — `seq 1 5000 > f`
+(shell redirect) and `cp src f` (child-written) — `wc -c < f` returned
+the exact byte count (23893) in 400/400 rounds, zero zero-reads, zero
+mismatches against the path-argument form. If it recurs, capture the
 exact producer (linker or shell redirect) before reclassifying; until
 then keep the workaround rule.
 
