@@ -417,6 +417,33 @@ normalize inside the script rather than relying on `//c`.
 
 ---
 
+## Q15. POSIX path args to child bash scripts arrive Windows-translated: in-script globs on `$1` silently fail
+
+**Repro:** `bash scripts/peer/collect_pe_runtime_dlls.sh /tmp/x` (peshell
+toolchain, 2026-09-23). The callee echoed its `$1` as
+`C:\Users\...\Temp\x`.
+
+**Observed:** inside the callee, `cp "$SYS32/$f" "$DEST/"` and `find
+"$DEST" -type f` (native tools) worked fine — 31 DLLs actually landed —
+but `ls "$DEST"/*.dll` produced nothing (bash glob cannot expand a
+backslash path), so `ls | wc -l` counted 0 and the script declared
+"UCRT forwarders insufficient (0 < 10)" and exited 1 despite a complete
+collection. Same pipeline executed interactively in the parent shell on
+the POSIX form works (31). I.e. the translation happens **at the
+bash→bash invocation boundary only**, and native utilities tolerate the
+Windows form while bash globbing does not — a false-failure that looks
+like a script bug.
+
+**Workaround:** normalize at script entry —
+`case "$1" in [A-Za-z]:\\*) DEST="$(cygpath -u "$1")";; esac`
+(cygpath is present under niubash; a sed fallback
+`s#^\([A-Za-z]\):#/\L\1#; s#\\#/#g` suffices). Applied in peshell
+`scripts/peer/collect_pe_runtime_dlls.sh`. General rule for toolchain
+scripts: never glob a path received as an argument without normalizing
+it first.
+
+---
+
 ## Verified compatible in the same session
 
 For calibration, the following worked as expected under niubash 1.1.4 in
