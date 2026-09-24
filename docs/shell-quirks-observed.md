@@ -45,11 +45,17 @@ real engine binary.
 | Q14 `wc -c < file` zero | Open, not reproducible in the audit |
 | Q15 POSIX path args translated | By design (MSYS/Git-Bash parity — Git Bash translated identically); keep the normalize-in-script rule |
 | Gate-era `grep --include` / `$(…\| grep -v …)` | Obsolete: refactor-gate.sh gone; both re-tested correct |
+| Q17 `nohup` eats the wrapped command's own options | **FIXED** in WinuxCmd `fix/nohup-posix-option-stop` 9c1448e ([unixwin/WinuxCmd#1131](https://github.com/unixwin/WinuxCmd/pull/1131)); release will carry it |
+| Q18 POSIX path inside interpreter `-c` source not translated (`open('/dev/null','w')` creates a real file) | By design (argv-level layer, Q15 family) — recorded for the failure modes |
+| Q19 build tool `-o /dev/null` → os error 17 | Tool behavior (rustc renames onto `NUL`); argv translation itself correct |
+| Q20 `cmd /c start ""` banner-only false alarm | Environmental (app exited for its own reason); `cmd /c start` probe-verified working |
 
 - **Shell under test:** niubash 1.1.4 (`bash --version` → "Niubash 1.1.4 —
   bash-compatible shell for Windows"), observed 2026-09-22. Second session
   2026-09-23 (long-running peshell T1-T8 + test-system campaign: ~200 shell
-  commands, batch scripts, cmd/PowerShell boundary work) produced Q4-Q12.
+  commands, batch scripts, cmd/PowerShell boundary work) produced Q4-Q12. Third session 2026-09-24 (DrvCeo reverse-engineering
+campaign: ~150 commands — MSVC 32-bit DLL build, Rust cdylib port, Frida
+attach/spawn, long-lived GUI process management) produced Q17-Q20.
 - **Reference shell:** GNU bash (POSIX). Constructs below are accepted by
   real bash and by `bash -n` under niubash, but behave differently at
   niubash **execution** time.
@@ -738,6 +744,187 @@ niubash build carrying the fix ships.
 
 ---
 
+## Q17. `nohup` consumes the wrapped command's own options, so `nohup prog -flag` never runs the program
+
+**Repro** (DrvCeo campaign, 2026-09-24):
+
+```bash
+nohup python -u drvceo_unlock.py > out/unlock.log 2>&1 &
+```
+
+**Observed (niubash 1.1.4, rubash `28d5757d3c8f`):**
+
+```
+nohup: invalid option -- 'u'
+Try 'nohup --help' for more information.
+```
+
+The unlocker never started, yet the call *looked* like a successful
+backgrounding. Minimised to `nohup echo -n hi` → `nohup: invalid option
+-- 'n'`, i.e. any option-bearing command wrapped in nohup dies.
+
+- Git Bash 5.3 control (same host): `nohup echo -n hi` prints `hi`,
+  exit 0. GNU coreutils `nohup.c` calls `getopt_long` with a leading
+  `"+"`, which disables option permutation, so option parsing stops at
+  the command name and the command's own flags pass through.
+- Damage class: the failure is **silent at the call site** — the shell
+  reports success, the log file is simply empty, and the wrapped job is
+  not running. This cost a diagnosis cycle before the log was checked.
+
+**Workaround** (all verified):
+
+```bash
+prog args > log 2>&1 &                    # nohup is not needed; persistence across
+                                          # tool calls verified in this session
+PYTHONUNBUFFERED=1 nohup python s.py &    # move the flag out of nohup's view
+nohup env python -u s.py &                # or hide it behind env
+```
+
+**Upstream candidate:** winuxcmd `nohup` — parse positionally (stop at
+the first non-option argument, the coreutils leading-`+` behaviour)
+instead of consuming/permuting the wrapped command's options.
+
+**Resolution (2026-09-24): FIXED in WinuxCmd.** Root cause confirmed as a
+two-layer defect, both fixed in `fix/nohup-posix-option-stop` 9c1448e
+([unixwin/WinuxCmd#1131](https://github.com/unixwin/WinuxCmd/pull/1131),
+based on post-recovery main `a83f307`, v1.1.3):
+
+- Framework parser: `option_policy_for_command` now sets
+  `stop_options_after_positionals = 1` for nohup (the same mechanism the
+  util-linux `getopt` entry already uses) — option processing stops at
+  the first non-option argument, exactly the coreutils leading-`+`
+  behaviour, so `nohup echo -n hi` runs `echo -n hi`.
+- Dispatcher: a new `nohup_standard_interception_enabled` hook gates the
+  generic `--help`/`--version` interception to nohup's own option prefix
+  (`--` ends the prefix; the first non-option token is the wrapped
+  command), so `nohup echo --help` runs `echo --help` instead of
+  printing nohup's help. The `--version` scan is now gated by the same
+  `standard_interception_enabled` hook that already gated the `--help`
+  scan; all other commands default to enabled, behavior unchanged.
+
+Verified on the built v1.1.3 tree: `nohup echo -n hi` → `hi`, exit 0;
+`nohup printf --version` → printf's version block; `nohup --help` /
+`nohup --version` before the command name still print nohup's own;
+`nohup -- prog` still runs prog. Seven regression tests added in
+`tests/unit/nohup/nohup_unit_test.cpp`; full WinuxCmd suite 2756/2756
+passed. I18N review: no user-visible text changed, no catalog update
+required. The workarounds above are no longer needed once a WinuxCmd
+release carries the fix.
+
+---
+
+## Q18. POSIX paths inside an interpreter's inline source (`-c`) are outside the translation boundary: `open('/dev/null','w')` silently creates a real file
+
+**Repro** (DrvCeo campaign, 2026-09-24):
+
+```bash
+echo probe > /tmp/probe.txt
+python -c "import os; print(os.path.exists('/tmp/probe.txt'))"   # → False
+python -c "open('/dev/null','w')"                                 # → creates D:\dev\null
+```
+
+**Observed:** the argv translation layer itself is correct and was
+verified directly —
+
+```bash
+python -c "import sys; print(sys.argv[1:])" /tmp/probe.txt
+# → ['C:\\Users\\...\\AppData\\Local\\Temp\\probe.txt']
+python -c "import sys; print(sys.argv[1:])" /dev/null
+# → ['NUL']
+```
+
+— but a path written **inside the `-c` source string** is program text,
+not an argument token, so no translation touches it. Python then resolves
+the POSIX-looking string itself as a drive-relative Windows path:
+
+- `'/tmp/probe.txt'` → `<cwd-drive>:\tmp\probe.txt` → `exists()` False
+  while `cat /tmp/probe.txt` (argv) read the file fine;
+- `open('/dev/null','w')` → created a real `D:\dev\null` file (confirmed
+  on disk, 0 bytes) instead of the null device — **silent stray-file
+  creation**, with the parent directory `D:\dev\` created alongside.
+
+The same shape surfaced with a build tool as the second symptom:
+`rustc --crate-type=lib --emit=metadata -o /dev/null x.rs` →
+`error: failed to write NUL: 系统无法将文件移到不同的磁盘驱动器。 (os error
+17)`. Here the argv translation *did* deliver `NUL`; the failure is
+rustc's temp-file-then-rename strategy unable to rename onto a device
+(see Q19).
+
+- Real bash: same interpreter behaviour (Python is Python), but under
+  MSYS/Git Bash the `-c` *string itself* is not special-cased either, so
+  this is not an niubash defect — it is the argv-level scope of the
+  translation layer (Q15) being misread as a whole-string layer.
+
+**Rule:** a POSIX path is translated only when it is an **argument
+token**. Inside `-c`/here-string/source text, pass the path as an
+argument or resolve it first (`cygpath -w /tmp/x`), and never hand
+`/dev/null` to an interpreter as a write target.
+
+**Classification (2026-09-24): BY DESIGN — Q15 family, recorded because
+both failure modes (false-negative existence check, silent stray-file
+creation) presented as shell faults and cost real diagnosis time.**
+`D:\dev\null` was deleted after the probe.
+
+---
+
+## Q19. Build tools that "write then rename" cannot target `/dev/null`: `rustc -o /dev/null` → os error 17
+
+**Repro:** `rustc --crate-type=lib --emit=metadata -o /dev/null naive.rs`
+
+**Observed:**
+
+```
+error: failed to write NUL: 系统无法将文件移到不同的磁盘驱动器。 (os error 17)
+```
+
+**Diagnosis (probe-verified):** niubash translated the argument correctly
+— `python -c "import sys; print(sys.argv[1:])" /dev/null` reports
+`['NUL']`, matching `cygpath -w /dev/null` → `NUL`. rustc does not write
+the output in place; it writes a temp file and renames it onto `-o`, and
+a rename onto the `NUL` device reports a cross-drive error. So the
+translation layer behaved, and the incompatibility is between rustc's
+output strategy and the Windows null device.
+
+- Real bash on Linux: `rustc -o /dev/null` works because `/dev/null`
+  accepts rename-style opens there.
+
+**Workaround:** point `-o` at a real file and delete it
+(`-o probe.rlib`), or omit `-o` when the default artefact name is
+acceptable.
+
+**Classification (2026-09-24): NOT AN NIUBASH QUIRK** — argv translation
+verified correct; recorded because the error text ("cannot move to a
+different disk drive") actively points away from the real mechanism.
+
+---
+
+## Q20. `cmd /c start ""` banner-only false alarm (explained as environmental)
+
+**Original observation** (first launch attempt of the DrvCeo campaign):
+`cmd /c start "" DrvCeo.unp.exe` produced only the Windows version banner
+plus a `D:\DrvCeo>` prompt at exit 1, and the process was absent from
+`tasklist` 6 s later — read at the time as "cmd ignored `/c` and went
+interactive", i.e. a suspected Q10 recurrence with the *correct* `/c`
+spelling.
+
+**Follow-up probe (same day):** `cmd /c start "" /min cmd /c "echo
+probe>D:\...\startprobe.txt"` created the probe file, so `/c` combined
+with `start` works correctly under niubash.
+
+**Explanation:** the app in the original run exited immediately for an
+app-level reason — its `Res/Languages/*.ini` were missing and were
+supplied by the operator minutes later — so the observed output belongs
+to the child's failure, not to the shell boundary. The banner/prompt
+transient was never reproduced.
+
+**Classification (2026-09-24): ENVIRONMENTAL — no shell action.** Kept
+because "banner-only ⇒ cmd went interactive" was the wrong first read;
+the Q10 addendum (`//c` vs `/c`) is still the reference for that class,
+and the general rule stands: verify the child's own reason for exiting
+before blaming the boundary.
+
+---
+
 ## Verified compatible in the same session
 
 For calibration, the following worked as expected under niubash 1.1.4 in
@@ -767,3 +954,20 @@ the command form; Q7 full-path rule still applies to `/switch` tools),
 `grep -P` for `\x` classes (Q11), background jobs writing explicit files
 (Q12 workaround), `git -C <repo>`, `cargo build/test/clippy`, `node`,
 and long single-quoted `-Command` strings without embedded `$`.
+
+Third session (2026-09-24) additions, verified in real campaign use
+(DrvCeo RE, ~150 commands): `python - <<'EOF'` heredocs (≈20×, including
+`$`-laden scripts), `wmic process where ... get ...`,
+`reg query "HKLM\..."`, `tasklist /M /FI "PID eq N"`,
+`tasklist /FI ... /FO CSV | cut -d'"' -fN`,
+`find "/c/Program Files/..." -name -path`, `sed -i` on plain patterns,
+`mv`/`cp`/`rm -rf`/`mkdir -p`/`du -sh` on `/d/...` paths, `cygpath -w`,
+`cargo build --release --target i686-pc-windows-msvc`, `rustup target add`,
+long-lived background `&` processes surviving across tool calls (GUI app
+verified alive over ~10 minutes and many intervening calls),
+`nohup cmd > log 2>&1 &` (no options after the command) surviving likewise,
+`cmd /c build.bat` for anything needing nested cmd quoting (Q20/Q5 rule),
+`cmd /c start "" /min cmd /c "..."`, `taskkill /IM ... /F` and
+`taskkill /PID ... /F`, and `grep -c` reporting exit 1 on a zero count
+(normal grep semantics — the harness flags it as `[exit code: 1]`, which
+is not an error).
