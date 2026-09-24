@@ -657,6 +657,61 @@ builtins is a niubash-runtime product behavior on top of the engine.
 
 ---
 
+## Q16. `$( )` capture bypasses wholesale for a failing child-process tree: output lands in the outer redirect, capture variable comes back empty
+
+**Repro:** a polling loop in niubash (peshell caps-flake hunt, 2026-09-24):
+
+```bash
+for i in $(seq 1 400); do
+  out=$(cargo test -q -p caps --lib -- http::tests --test-threads=1 2>&1)
+  if echo "$out" | grep -q "FAILED\|panicked"; then
+    echo "$out" > fail-$i.log; echo "RUN $i FAILED"
+  else
+    echo "run $i ok"
+  fi
+done > summary.txt 2>&1
+```
+
+**Observed:** 3 of 400 iterations (runs 83/135/400) hit a genuinely
+failing `cargo test` (exit non-zero), and on exactly those iterations the
+**entire** cargo output — including `running 3 tests`, the libtest
+failure report, the panic line, `test result: FAILED...` and
+`error: test failed...` — appeared in `summary.txt` (the loop's own
+stdout redirect) while `$out` behaved as empty: the else branch printed
+`run 83 ok` and no `fail-83.log` was written. So the substitution capture
+not only lost the output but **the same bytes reached the parent's
+stdout**, i.e. the child's stderr/stdout were attached to the parent
+stream rather than the capture pipe. Control experiments: (a) a plain
+failing subshell `out=$( (…3000 lines…); exit 3 ) 2>&1` captures all 3001
+lines completely — so a bare non-zero exit alone does not trigger it;
+(b) the bypass is intermittent and was only observed when the substituted
+command is a failing **process tree** (cargo → test exe grandchild).
+Net effect: failure-detection logic keyed on the capture value silently
+flips to the success branch, while the evidence surfaces elsewhere —
+a false-success that hides the very failure it polls for.
+
+**Workaround:** do not key branch logic on `$( )` when the substituted
+command is a process tree that may fail; redirect to a file and read it
+back instead:
+
+```bash
+cargo test -q -p caps --lib -- http::tests > run.log 2>&1 || {
+  grep "panicked at" run.log; }
+```
+
+(file capture keeps every byte on the failure path; the peshell 150-run
+validation loop for the flake fix used exactly this form).
+
+**Upstream candidate:** in the substitution collector, a grandchild
+holding duplicate write ends (cargo spawns the test binary with inherited
+stdout/stderr) can outlive the collector's reader-wait or attach to the
+wrong end when the direct child exits non-zero; suspected reader-vs-fd
+cleanup race in the `$( )` implementation. Worth a targeted fixture:
+`bash -c 'out=$(sh -c "sh -c \"echo CHILD; exit 7\" 2>&1" 2>&1)'` variants
+with mixed exit codes and output sizes.
+
+---
+
 ## Verified compatible in the same session
 
 For calibration, the following worked as expected under niubash 1.1.4 in
