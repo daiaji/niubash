@@ -362,6 +362,61 @@ not niubash; recorded here for agent awareness only.
 
 ---
 
+## Q13. `vswhere -latest` returns zero instances despite VS2022 with full VC tools installed
+
+**Repro:** `vswhere.exe -latest -products '*' -property installationPath`
+(and the `-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64`
+variant) on a host where
+`C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44...\bin\Hostx64\x64\cl.exe`
+exists and `rustc` x86_64-pc-windows-msvc builds link fine.
+
+**Observed:** vswhere prints only its banner — zero instance rows, so any
+build script that locates `vcvars64.bat` via vswhere concludes "no MSVC"
+and falls through to MinGW/toolchain-missing, even though cl.exe is
+installed and usable.
+
+**Workaround:** after the vswhere probes, glob the standard installation
+roots directly and probe for the batch file:
+`/c/Program Files/Microsoft Visual Studio/2022/{Community,Professional,Enterprise,BuildTools}/VC/Auxiliary/Build/vcvars64.bat`
+(implemented in peshell `scripts/peer/serial_cmd/build.sh`). Root cause
+(Instance registry not readable to vswhere) is a host/VS-installer issue,
+not niubash — recorded as a toolchain quirk per the logging mandate.
+
+---
+
+## Q14. `wc -c < file` reports 0 for a freshly written file
+
+**Repro:** `build.sh` prints `serial_cmd.exe（$(wc -c < "$OUT") bytes）`
+right after the linker writes the exe; niubash reported `0 bytes` while
+`ls -la` showed 283648.
+
+**Observed:** the redirected-stdin form of `wc -c` read zero bytes at
+least for the just-created output file; `ls -la` is correct. (Q12-family:
+metadata/read path races around freshly produced files.)
+
+**Workaround:** use `ls -la` / `stat -c %s` (or `wc -c` on a path
+argument rather than redirected stdin) when the number gates a decision.
+
+---
+
+## Q10 addendum (root cause confirmed deterministic): `cmd //c` under niubash is a silent-success trap
+
+Q10 recorded intermittent behavior. The 2026-09-23 serial_cmd build gave
+a deterministic reproduction with a precise mechanism: niubash performs
+**no MSYS-style path/argument translation**, so `cmd //c script.cmd`
+hands cmd the literal token `//c`; cmd does not recognize it as the
+`/c` switch and starts **interactive** with the script name as its first
+prompt input — it reads the attached pipeline/stdin, hits EOF, and exits
+0 having never executed the batch (banner + prompt in the output, side
+effects absent). Hence: with attached non-empty stdin it can *sometimes*
+consume and run lines (the "intermittent" face of Q10); with EOF stdin
+it is a deterministic silent no-op. The single-slash form
+`cmd /c script.cmd` is the correct invocation under niubash (verified:
+batch executes every time). If a script must stay Git-Bash-compatible,
+normalize inside the script rather than relying on `//c`.
+
+---
+
 ## Verified compatible in the same session
 
 For calibration, the following worked as expected under niubash 1.1.4 in
