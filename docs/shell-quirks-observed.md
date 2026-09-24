@@ -710,6 +710,28 @@ cleanup race in the `$( )` implementation. Worth a targeted fixture:
 `bash -c 'out=$(sh -c "sh -c \"echo CHILD; exit 7\" 2>&1" 2>&1)'` variants
 with mixed exit codes and output sizes.
 
+**Status (2026-09-24 audit): CONFIRMED on rubash `2bb0277c` — root cause
+located (not the grandchild-race candidate above), fix in
+[rubash PR #123](https://github.com/unixwin/rubash/pull/123).** The audit
+rebuilt the trigger precisely: the "process tree" framing was incidental —
+**any external command** inside `$( )` bypasses once an enclosing compound
+redirect (for loop / brace group) is present, and on the current engine the
+bypass is **deterministic** (20/20 with `$(hostname 2>&1)` inside a
+redirected loop; the recorded 3/400 was the same defect at lower
+probability). Pure subshells and builtins capture correctly; `$(a | b)`
+pipelines are unaffected (stage capture path). Mechanism: `4fe2a48f` binds
+compound redirects once into the fd table; `command_substitution_executor`
+clones the parent's table verbatim, so the substitution child inherits the
+loop's fd-1 file binding, and `apply_external_stdout_redirect` prefers
+that binding over the capture context — the external child is spawned
+straight onto the outer redirect file while `$( )` drains an empty pipe.
+GNU semantics (subst.c:7143): the substitution body's stdout is the
+capture pipe; only body-owned redirects may rebind it. The fix drops the
+inherited fd-1 binding at the cmdsub boundary (body-owned redirects still
+rebind; fd 2 stays inherited — `$( )` does not capture stderr), with two
+regression tests in rubash. Keep the file-redirect workaround until a
+niubash build carrying the fix ships.
+
 ---
 
 ## Verified compatible in the same session
